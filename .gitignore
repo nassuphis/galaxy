@@ -1,3 +1,10 @@
+# stuff
+.DS_Store
+*.png
+*.pdf
+galaxy/
+!galaxy_logo/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
