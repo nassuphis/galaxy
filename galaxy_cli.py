@@ -51,9 +51,9 @@ def render_chain_tile(
 
     t1 = time.perf_counter()
     if BUCKET_METHOD=="serial":
-        order, r_vals, starts, counts = galaxy_raster.bucket_by_radius(r_px, rmin, r_max)
+        order, r_vals, starts, counts = raster.bucket_by_radius(r_px, rmin, r_max)
     elif BUCKET_METHOD=="parallel":
-        order, r_vals, starts, counts = galaxy_raster.bucket_by_radius_parallel(r_px, rmin, r_max)
+        order, r_vals, starts, counts = raster.bucket_by_radius_parallel(r_px, rmin, r_max)
     else: 
         raise ValueError(f"invalid BUCKET_METHOD: {BUCKET_METHOD}")
     
@@ -79,11 +79,11 @@ def render_chain_tile(
         if c <= 0:
             continue
         e = s + c
-        dy, dx = galaxy_raster.make_disc_offsets(int(rr))
+        dy, dx = raster.make_disc_offsets(int(rr))
         step = 32768
         for i in range(s, e, step):
             j = min(i + step, e)
-            galaxy_raster.stamp_points(canvas, pys[i:j], pxs[i:j], dy, dx)
+            raster.stamp_points(canvas, pys[i:j], pxs[i:j], dy, dx)
     if verbose:
         print(f"[render] stamp complete ({time.perf_counter()-t2:.3f}s total={time.perf_counter()-t0:.3f}s)")
     return canvas
