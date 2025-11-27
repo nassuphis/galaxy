@@ -1,0 +1,356 @@
+\documentclass{article}
+\usepackage[portrait, headheight = 0cm, margin=0.25cm, top = 0.25cm]{geometry} 
+\usepackage{graphicx}
+\usepackage[dvipsnames,table]{xcolor}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage[export]{adjustbox}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{fontspec}
+
+\title{
+\vskip 10cm
+{\bf\huge {\tt galaxy\_cli.py}}
+\vskip 1cm
+{\bf\huge shaped randomness}
+\vskip 1cm
+{\bf\huge pipeline}
+\vskip 3cm
+}
+\author{Wigerich}
+
+\begin{document}
+\maketitle
+
+\newpage
+\tableofcontents
+
+\newpage
+\section{Overview of the Galaxy Rendering Pipeline}
+
+\texttt{galaxy\_cli.py} provides a programmable, chain–driven point-cloud 
+renderer for producing high–resolution black–on–white (or inverted) galaxy images.  
+A ``chain'' is a comma–separated sequence of operations, each with optional 
+arguments, interpreted by the \texttt{specparser}/\texttt{expandspec} system.  
+Each operation transforms an evolving complex vector 
+\(\,z \in \mathbb{C}^N\,\) together with an auxiliary ``dot–multiplier’’
+state that controls per–point radii during rasterization.
+
+The pipeline has three layers:
+
+\begin{enumerate}
+  \item \textbf{Point generators}: create raw point sets 
+        (e.g.\ \texttt{rud}, \texttt{rua}, \texttt{runif}, 
+        triangular/square samplers, IFS fractals, Hilbert/Moore/Z–curves,
+        Lorenz/Clifford/Hénon/DeJong/Tinker/Gumira/Peano/Vicsek, etc.).
+        These append new points to the tail of~\(z\).
+
+  \item \textbf{Geometric transforms}: smooth, swirl, warp, reflect, discretize,
+        pixelize, diffuse, or apply kaleidoscopic transforms to the unfrozen tail.  
+        All transforms operate either on Cartesian coordinates 
+        \(x=\Re z\), \(y=\Im z\), or on radius–angle decompositions.
+        Examples include:
+        \begin{itemize}
+          \item \textit{teardrop deformation} (\texttt{td})
+          \item \textit{global or local swirl} (\texttt{swirl})
+          \item \textit{arms} (radial duplication)
+          \item \texttt{walk}/\texttt{pwalk}/\texttt{ddiffuse}
+          \item clipping primitives (\texttt{clp*})
+          \item discretizers and pixelizers (\texttt{idscr}, \texttt{rdscr}, 
+                \texttt{ddscr}, \texttt{pixelate}, \texttt{xorelate}, 
+                \texttt{equalate})
+        \end{itemize}
+
+  \item \textbf{Dot–size groups}: each call to \texttt{dot}, \texttt{ldot}, or 
+        other dot–operations ``freezes'' the current tail and writes a new 
+        vector of per–point radii into the \texttt{K\_MULT} state.  
+        Subsequent operations modify only the new tail, enabling multi-layer 
+        compositions where different subsets of points receive different 
+        effective pixel radii during rasterization.
+        Group IDs are stored in the imaginary part of the state vector.
+\end{enumerate}
+
+The result of evaluating a chain is the tuple
+\[
+   (z,\; \mathrm{mult}),
+\]
+where \(\mathrm{mult}_i \in \mathbb{R}_{>0}\) denotes the logical radius of 
+point~\(z_i\), later converted to pixel units by
+\[
+   r_{\mathrm{px}} = \mathrm{mult} \cdot \texttt{fos}\cdot (\texttt{pix}-1).
+\]
+
+The final image is obtained by projecting \(z\) into pixel coordinates with a 
+margin fraction and stamping filled discs of radius \(r_{\mathrm{px}}\) onto a 
+bilevel canvas.
+
+\newpage
+\section{Chain Evaluation and Rendering}
+
+A chain is a sequence
+\[
+   \texttt{name\_1:arg\_1, \quad name\_2:arg\_2, \quad \dots}
+\]
+expanded by \texttt{expandspec} into one or more fully–specified chains.
+Each chain is evaluated by the macro engine:
+
+\[
+   z_0 = \varnothing,\qquad
+   (z_{k+1},\, \text{state}) = 
+      \texttt{op}_{k}(z_k, a_k, \text{state}).
+\]
+
+All operations belong to the registry \texttt{ALLOWED}.  
+Generators append points; transforms mutate the unfrozen tail;  
+size–ops write to the dot–multiplier state.
+
+\paragraph{Freezing semantics.}
+Whenever a dot–operation (\texttt{dot}, \texttt{ldot}, \texttt{dotset}, \texttt{dcopy}, \ldots)
+runs, the current tail of \(z\) is assigned a new group ID.  
+Future geometric operations modify only points added \emph{after} that group.  
+Thus a chain naturally decomposes into ``generative stages,’’ 
+each associated with its dot–size profile.
+
+\paragraph{Projection and rasterization.}
+Given \(z\) and \(\mathrm{mult}\),
+the system performs:
+
+\begin{enumerate}
+  \item \textbf{Logical projection}:
+        \[
+            (x_i,y_i) = \text{scaled and centered coordinates of } z_i,
+        \]
+        with a margin fraction to avoid boundary clipping.
+
+  \item \textbf{Radius bucketing}:  
+        integer radii \(r_{\mathrm{px}} \in \mathbb{N}\) are grouped by 
+        radius value.  
+        A parallel bucketing kernel (\texttt{bucket\_by\_radius\_parallel}) 
+        reorders indices so that all points of the same radius are contiguous.
+
+  \item \textbf{Stamping}:  
+        for each radius \(r\), precomputed offsets
+        \(\{(\Delta x,\Delta y)\}\) form a filled disc.  
+        Batches of points are stamped into a 
+        \texttt{pix}\(\times\)\texttt{pix}  
+        uint8 canvas.  
+        This produces a bilevel image with anti–aliased edge appearance due to 
+        the dense point structure, not due to greyscale blending.
+\end{enumerate}
+
+\paragraph{Mosaic mode.}
+If a chain expands to multiple variants, each variant is rendered as an 
+independent tile.  
+The \texttt{mosaic} function arranges tiles in a regular grid with optional 
+gap, per–tile footer text, and optional thumbnail export.
+
+\paragraph{Determinism.}
+All Numba kernels use fixed RNG seeds at the Python level, and operations such 
+as \texttt{\_rmax\_serial} ensure radius–dependent transforms remain 
+deterministic across parallel hardware.
+
+\newpage
+\section{Point Generators}
+
+Point generators append new complex points to the current tail of \(z\).
+They do not modify previously frozen groups and they do not interact with the
+dot–multiplier state except through the chain structure.
+
+Generators fall into three categories:
+
+\subsection*{1. Random generators}
+
+\begin{itemize}
+  \item \texttt{runif}: uniform in a rectangle.
+  \item \texttt{rnorm}: Gaussian cloud.
+  \item \texttt{rud}: radial distribution in a disk, using \(r = u^{d_\theta}\).
+  \item \texttt{rua}: arc segment between two angles.
+  \item \texttt{rus}: square with exponent distortion.
+  \item \texttt{rtr}, \texttt{rtrd}: triangle distributions (uniform or Dirichlet).
+  \item \texttt{rsqd}, \texttt{rsqedge}: square and square-edge distribution.
+\end{itemize}
+
+All these calls produce
+\[
+   z_{\mathrm{new}} = \{x_i + i y_i\}_{i=1}^{N},
+\]
+with the shape of the distribution determined by geometric parameters.
+
+\subsection*{2. Deterministic grids}
+
+\begin{itemize}
+  \item \texttt{serp}: serpentine raster scan over a \(m\times m\) mesh.
+  \item \texttt{carusq}, \texttt{cargsq}: Cartesian square sampling 
+        (uniform or grid).
+  \item \texttt{carudsk}, \texttt{cargdsk}: Cartesian disk sampling
+        (uniform or ring-discretized).
+\end{itemize}
+
+\subsection*{3. Fractal and chaotic generators}
+
+\begin{itemize}
+  \item Lorenz, Clifford, Hénon, DeJong, Tinker, Gumira maps.
+  \item Hilbert, Moore, Z–curve, Peano, Peano–poly, Vicsek, Gosper (“flowsnake”).
+  \item Levy C–curve, Koch snowflake, Heighway dragon.
+  \item IFS fractals: \texttt{sierptri}, \texttt{sierpcarpet}, \texttt{fern}.
+  \item Julia set sampler: \texttt{julia}.
+\end{itemize}
+
+These provide structured or chaotic point clouds suitable for later
+transformations.
+
+\newpage
+\section{Geometric Transforms}
+
+Geometric transforms mutate the current tail of \(z\) in place.  
+All transforms operate on \(x=\Re z\) and \(y=\Im z\) through either 
+direct coordinate manipulation or pointwise functions.
+
+\subsection*{Continuous deformations}
+
+\begin{itemize}
+  \item \texttt{td}: teardrop deformation with smoothstep blending.
+  \item \texttt{swirl}: radial swirl, applied only where \(|z| > 1\).
+  \item \texttt{squish}: vertical squashing.
+  \item \texttt{arms}: rotational replication into \(m\) arms.
+  \item \texttt{rot}, \texttt{grot}, \texttt{sqrot}: rotations and
+        elliptical shears.
+\end{itemize}
+
+\subsection*{Random diffusion}
+
+\begin{itemize}
+  \item \texttt{walk}: uniform random walk.
+  \item \texttt{pwalk}: amplitude–weighted walk.
+  \item \texttt{ddiffuse}: radial diffusion.
+\end{itemize}
+
+\subsection*{Kaleidoscope transforms}
+
+\begin{itemize}
+  \item \texttt{elkal}, \texttt{elkal1}: ellipse–based ring structures.
+  \item \texttt{linkal}: line–based kaleidoscope warped by ring index.
+  \item \texttt{asp}: Archimedean spiral based on real seed.
+  \item \texttt{lsp}: logarithmic spiral.
+\end{itemize}
+
+All transforms preserve group boundaries (freezing semantics).
+
+\newpage
+\section{Clipping and Filtering}
+
+Clipping operations remove points from the unfrozen tail based on geometric
+predicate tests.  
+
+\begin{itemize}
+  \item \texttt{clpindisk}, \texttt{clpoutdisk}: inside/outside disks.
+  \item \texttt{clpinsq}, \texttt{clpoutsq}: inside/outside squares.
+  \item \texttt{clpinrect}, \texttt{clpoutrect}: rectangular windows.
+\end{itemize}
+
+These return
+\[
+   z' = \{ z_i \in \text{tail} : \text{predicate}(z_i) \}.
+\]
+
+Composite macros (e.g.\ \texttt{frame}, \texttt{yin}) chain multiple clipping
+operations to sculpt complex outlines from an initially large sample.
+
+\newpage
+\section{Discretizers and Pixelization}
+
+These operators map continuous point clouds onto piecewise–constant grids,
+useful for producing ``mosaic,'' ``pixel,'' or ``banded’’ structures.
+
+\subsection*{Coordinate–based discretizers}
+
+\begin{itemize}
+  \item \texttt{discr}, \texttt{rdscr}: quantize one axis and apply a power.
+  \item \texttt{idscr}: horizontal line discretization with boundary preservation.
+  \item \texttt{ddscr}: radial discretization in polar coordinates.
+\end{itemize}
+
+\subsection*{Histogram–based pixel operations}
+
+Using \(\texttt{histogram2d}\), bins are populated and converted back into 
+representative centers.
+
+\begin{itemize}
+  \item \texttt{pixelate}: retain bins with count \(\ge\) threshold.
+  \item \texttt{xorelate}: retain bins with count mod \(k \ne 0\).
+  \item \texttt{equalate}: retain bins with count \(=k\).
+\end{itemize}
+
+\subsection*{Stochastic pixelization}
+
+\begin{itemize}
+  \item \texttt{gpixsq}, \texttt{gpixdsk}: gradual pixelization with 
+        smoothstep–weighted replacement inside each bin.
+\end{itemize}
+
+These create structural abstractions and “digital” textures when fed into
+later transforms.
+
+\newpage
+\section{Dot--Size Groups}
+
+Dot–size operations control the rasterized radius of each point.  
+They do not change coordinates; instead they write size vectors into the 
+\texttt{K\_MULT} state.
+
+\subsection*{Creating groups}
+
+\begin{itemize}
+  \item \texttt{dot}: constant logical size.
+  \item \texttt{ldot}: lognormal size distribution.
+\end{itemize}
+
+Each call freezes the current tail and creates a new group:
+\[
+   \mathrm{mult}[i] = s_i + i \cdot \mathrm{gid},
+\]
+where the real part gives the logical radius and the imaginary part encodes
+the group ID.
+
+\subsection*{Modifying existing groups}
+
+\begin{itemize}
+  \item \texttt{dotset}: overwrite last group’s sizes.
+  \item \texttt{dotrhset}, \texttt{dotulset}, \texttt{dotlrset}: 
+        modify sizes based on quadrant selection.
+  \item \texttt{doturln}, \texttt{dotllln}: local lognormal replacements.
+  \item \texttt{dcopy}: replicate the size distribution of an earlier group.
+  \item \texttt{dneg}: sign–flip the last group's sizes.
+\end{itemize}
+
+Groups partition the evolution of the chain into explicit layers.  
+When the image is rasterized, each layer’s size controls the disk radius
+assigned to its points.
+
+\newpage
+\section{Numba Kernels and Performance}
+
+Many core operations are implemented using \texttt{Numba} for speed.  
+The system distinguishes:
+
+\begin{itemize}
+  \item \textbf{Serial kernels}: deterministic reductions (e.g.\ radius maxima) 
+        where order must be preserved.
+  \item \textbf{Parallel kernels}: per–point transforms (\texttt{swirl},
+        \texttt{td}, \texttt{\_sink\_gaussian\_inplace\_fast}, \ldots).
+  \item \textbf{Hybrid kernels}: serial precomputation followed by parallel
+        per–point application.
+\end{itemize}
+
+The geometry warmup routine pre-binds ufunc loops to avoid JIT latency during
+the first large render.
+
+All random generators rely on a Python–level \texttt{default\_rng} for 
+reproducibility.  
+Parallelism is confined to pointwise kernels; deterministic components 
+(e.g.\ global radius estimation) remain serial to avoid race–induced variation.
+
+
+
+\end{document}
